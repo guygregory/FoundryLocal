@@ -6,6 +6,8 @@ import gradio as gr
 # Model setup
 # -----------------------------------------------------------------------------
 
+# By using an alias, the most suitable model will be downloaded to your
+# end‑user's device.
 alias = "phi-3.5-mini"
 
 # Create a FoundryLocalManager instance. This will start the Foundry Local
@@ -25,7 +27,7 @@ model_id = manager.get_model_info(alias).id
 # Gradio front‑end
 # -----------------------------------------------------------------------------
 
-def generate_response(user_prompt: str):
+def generate_response(user_prompt: str, history: list[tuple[str, str]]):
     """Stream tokens from the local model to the Gradio output box.
 
     During streaming:
@@ -33,22 +35,35 @@ def generate_response(user_prompt: str):
       • disable Submit and Clear buttons
     When streaming completes, re-enable the buttons.
     """
-    partial_answer = ""
-    first_chunk = True
+    partial_answer, first_chunk = "", True
 
-    # Immediately clear input and disable buttons
+    # build a complete messages list with explicit speaker labels
+    messages = []
+    for user_turn, assistant_turn in history:
+        messages.append({"role": "user", "content": f"User: {user_turn}"})
+        if assistant_turn:                       # skip empty assistant slots
+            messages.append({"role": "assistant", "content": f"Assistant: {assistant_turn}"})
+
+    # add current prompt with label
+    messages.append({"role": "user", "content": f"User: {user_prompt}"})
+
+    # append user prompt with empty assistant reply slot
+    history.append((user_prompt, ""))
+
+    # immediately clear input & disable buttons
     yield (
-        gr.update(value=""),                 # output_box (keep empty for now)
-        gr.update(value=""),                 # user_input cleared
-        gr.update(interactive=False),        # submit_btn disabled
-        gr.update(interactive=False),        # clear_btn  disabled
+        history,                      # Chatbot content
+        gr.update(value=""),          # user_input
+        gr.update(interactive=False), # submit_btn
+        gr.update(interactive=False), # clear_btn
+        history                       # state
     )
 
-    # Create a streaming completion request
+    # Create a streaming completion request with full history
     stream = client.chat.completions.create(
         model=model_id,
         max_tokens=4096,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=messages,          # CHANGED: send entire conversation
         stream=True,
     )
 
@@ -59,44 +74,52 @@ def generate_response(user_prompt: str):
             content = delta.content.lstrip() if first_chunk else delta.content
             first_chunk = False
             partial_answer += content
+            history[-1] = (user_prompt, partial_answer)
 
-            # Keep buttons disabled while streaming
             yield (
-                partial_answer,
+                history,
                 gr.update(value=""),
                 gr.update(interactive=False),
                 gr.update(interactive=False),
+                history
             )
 
-    # Streaming finished – re-enable buttons
+    # finish streaming – re-enable buttons
     yield (
-        partial_answer,
+        history,
         gr.update(value=""),
         gr.update(interactive=True),
         gr.update(interactive=True),
+        history
     )
 
-# Helper to clear both boxes
+# NEW: helper to clear both boxes
 def clear_fields():
-    """Return empty values for Assistant output and user input."""
-    return "", ""
+    """Clear both boxes and reset history."""
+    return [], "", []   # Chatbot empty, user_input empty, history reset
 
 with gr.Blocks(
     fill_height=True,
     fill_width=True,
     # Add CSS to make the textbox a flex child that can scroll vertically.
     css="""
-    .scrollable-output { flex: 1 1 auto; min-height: 0; }
-    .scrollable-output textarea { overflow-y: auto; }
-    """
+    .scrollable-chatbot {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        border: 1px solid #d0d0d0;
+        border-radius: 4px;
+    }
+    """,
+    title=f"Foundry Local - {alias}"      # NEW: page title
 ) as demo:
-    # Large output box at the top (read-only)
-    output_box = gr.Textbox(
+    gr.Markdown(f"""<h2 style="text-align: center;">Foundry Local - {alias}</h2>""")
+    chat_state = gr.State([])  # NEW
+
+    # Chatbot replaces Textbox
+    output_box = gr.Chatbot(
         label="Assistant",
-        lines=20,
-        interactive=False,
-        placeholder="The model's response will appear here, streamed live…",
-        elem_classes="scrollable-output"  # class used in CSS above
+        elem_classes="scrollable-chatbot"
     )
 
     # Small input box with a submit button below
@@ -110,20 +133,20 @@ with gr.Blocks(
     # Wire up both the button click and the ⏎ keypress in the textbox
     submit_btn.click(
         fn=generate_response,
-        inputs=user_input,
-        outputs=[output_box, user_input, submit_btn, clear_btn],  # updated outputs
+        inputs=[user_input, chat_state],
+        outputs=[output_box, user_input, submit_btn, clear_btn, chat_state],
     )
     user_input.submit(
         fn=generate_response,
-        inputs=user_input,
-        outputs=[output_box, user_input, submit_btn, clear_btn],  # updated outputs
+        inputs=[user_input, chat_state],
+        outputs=[output_box, user_input, submit_btn, clear_btn, chat_state],
     )
 
-    # Clear button resets both boxes
+    # NEW: clear button resets both boxes
     clear_btn.click(
         fn=clear_fields,
         inputs=None,
-        outputs=[output_box, user_input],
+        outputs=[output_box, user_input, chat_state],
     )
 
 # -----------------------------------------------------------------------------
